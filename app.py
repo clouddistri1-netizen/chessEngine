@@ -3,7 +3,8 @@ import re
 import sys
 import math
 import io
-import stat  # Importado para verificar permissões
+import stat
+import requests  # Necessário para baixar do GitHub
 import chess
 import chess.pgn
 import chess.engine
@@ -11,29 +12,68 @@ from flask import Flask, render_template, jsonify, request
 
 app = Flask(__name__)
 
-# --- CONFIGURAÇÕES DA ENGINE (ADAPTADO PARA LINUX) ---
+# --- CONFIGURAÇÕES DA ENGINE (GITHUB) ---
 
-# Define o diretório base onde o app.py está
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+ENGINE_FOLDER = os.path.join(BASE_DIR, "engines")  # Pasta para guardar a engine
 
-# Caminho baseado na sua imagem: pasta 'stockfish' -> arquivo 'stockfish-ubuntu-...'
-# Se o seu servidor não suportar AVX2, você precisará compilar uma versão diferente.
-ENGINE_BINARY = "stockfish-ubuntu-x86-64-avx2"
-ENGINE_PATH = os.path.join(BASE_DIR, "stockfish", ENGINE_BINARY)
+# Nome do executável que vem do GitHub. 
+# Se no release o ficheiro se chama "Engine", mantemos assim.
+# Se for "Engine-linux" ou algo similar, altera aqui.
+ENGINE_BINARY = "Engine" 
+
+ENGINE_PATH = os.path.join(ENGINE_FOLDER, ENGINE_BINARY)
+
+# URL direto para o download do Asset da Release.
+# NOTA: Tu precisas verificar o link exato do ficheiro no GitHub.
+# Geralmente é algo como: https://github.com/USER/REPO/releases/download/TAG/FILENAME
+# Vou assumir que existe uma tag 'v1.0' (exemplo) e o ficheiro é 'Engine'.
+# SE O LINK MUDAR, ALTERA AQUI:
+GITHUB_DOWNLOAD_URL = "https://github.com/clouddistri1-netizen/chessEngine/releases/download/engine/engine"
 
 OUT_FILE = os.path.join(BASE_DIR, 'out.txt')
 ANALYSIS_DEPTH = 16 
 
-# --- FUNÇÃO PARA GARANTIR PERMISSÃO DE EXECUÇÃO (LINUX) ---
+# --- FUNÇÕES DE SISTEMA E SETUP ---
+
 def ensure_executable(path):
-    """Garante que o stockfish tenha permissão +x no Linux"""
+    """Garante que a engine tenha permissão +x no Linux"""
     try:
         st = os.stat(path)
         os.chmod(path, st.st_mode | stat.S_IEXEC)
     except Exception as e:
         print(f"Aviso: Não foi possível alterar permissões da engine: {e}")
 
-# --- FUNÇÕES DE PARSE DO FRONTEND ---
+def check_and_download_engine():
+    """Verifica se a engine existe, se não, tenta baixar do GitHub."""
+    if not os.path.exists(ENGINE_FOLDER):
+        os.makedirs(ENGINE_FOLDER)
+
+    if not os.path.exists(ENGINE_PATH):
+        print(f"Engine não encontrada em {ENGINE_PATH}.")
+        print(f"A tentar baixar de: {GITHUB_DOWNLOAD_URL} ...")
+        try:
+            response = requests.get(GITHUB_DOWNLOAD_URL, stream=True)
+            if response.status_code == 200:
+                with open(ENGINE_PATH, 'wb') as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        f.write(chunk)
+                print("Download concluído com sucesso!")
+                ensure_executable(ENGINE_PATH)
+            else:
+                print(f"Erro ao baixar: Status code {response.status_code}")
+                print("Verifique se o URL da release está correto.")
+                return False
+        except Exception as e:
+            print(f"Erro ao tentar baixar a engine: {e}")
+            return False
+    else:
+        # Garante permissões mesmo que já exista
+        ensure_executable(ENGINE_PATH)
+    
+    return True
+
+# --- FUNÇÕES DE PARSE DO FRONTEND (MANTIDAS) ---
 def parse_eval(eval_str):
     try:
         clean = eval_str.replace('+', '').replace('#', '').strip()
@@ -140,14 +180,14 @@ def formatar_score(score):
     return "0.00"
 
 def run_analysis(pgn_text):
-    """Executa o Stockfish e gera o arquivo out.txt"""
+    """Executa a engine personalizada e gera o arquivo out.txt"""
     print("Iniciando análise...")
     
-    # Validação do binário
-    if not os.path.exists(ENGINE_PATH):
-        return {"error": f"Engine não encontrada em: {ENGINE_PATH}"}
-    
-    # Garante permissão de execução no Linux
+    # 1. Verifica se a engine existe, se não, tenta baixar
+    if not check_and_download_engine():
+        return {"error": f"Não foi possível encontrar ou baixar a engine: {ENGINE_BINARY}. Verifique o URL ou coloque o ficheiro manualmente na pasta 'engines'."}
+
+    # Garante permissão de execução (redundância, mas seguro)
     ensure_executable(ENGINE_PATH)
 
     try:
@@ -158,8 +198,13 @@ def run_analysis(pgn_text):
 
         board = game.board()
         
-        # Inicia a Engine
-        engine = chess.engine.SimpleEngine.popen_uci(ENGINE_PATH)
+        # Inicia a Engine Personalizada
+        # A maioria das engines modernas usa protocolo UCI, como o Stockfish.
+        try:
+            engine = chess.engine.SimpleEngine.popen_uci(ENGINE_PATH)
+        except Exception as e:
+            return {"error": f"Falha ao iniciar a engine (Ela é compatível com UCI?): {e}"}
+
         engine.configure({"Threads": 2, "Hash": 64})
 
         results_buffer = []
@@ -244,5 +289,11 @@ def submit_game():
     return jsonify(result)
 
 if __name__ == '__main__':
-    # host='0.0.0.0' permite acesso externo se estiver rodando num servidor
+    # Cria a pasta se não existir
+    if not os.path.exists(ENGINE_FOLDER):
+        os.makedirs(ENGINE_FOLDER)
+    
+    # Tenta baixar a engine ao iniciar o servidor
+    check_and_download_engine()
+    
     app.run(debug=True, host='0.0.0.0', port=5000)
